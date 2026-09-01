@@ -1,0 +1,21 @@
+# Phase 1 — DART/KRX 원천 데이터 파이프라인
+OpenDartReader
+pandas
+numpy
+python-dotenv
+requests
+beautifulsoup4
+lxml
+FinanceDataReader
+
+# Phase 2 — 배치 구축 / 텍스트 임베딩
+pyarrow
+sentence-transformers
+scikit-learn
+
+# Phase 4 — 베타 회귀 / WACC
+statsmodels
+
+# Phase 5 — 대시보드
+streamlit
+plotly

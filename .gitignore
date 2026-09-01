@@ -1,2 +1,6 @@
 comp_comp_selec/
 .env
+docs_cache/
+data/raw/
+data/processed/
+__pycache__/
