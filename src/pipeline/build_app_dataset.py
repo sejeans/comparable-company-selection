@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.pipeline.build_universe import DATA_PROCESSED
+from src.paths import DATA_PROCESSED
 
 DROP_COLUMNS = ["business_description", "rcept_no"]
 

@@ -2,6 +2,7 @@
 
 실행: comp_comp_selec/Scripts/python.exe -m streamlit run src/app/streamlit_app.py
 """
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -19,14 +20,13 @@ from src.analysis.scorecard import build_scorecard, rank_candidates
 from src.analysis.similarity import embed_business_description, select_candidates
 from src.analysis.wacc import beta_pool_sensitivity, compute_wacc, debt_weight_from_ratio, sensitivity_summary
 from src.collectors.krx_price import get_market_caps
+from src.paths import DATA_PROCESSED
 
 UNIVERSE_YEAR = 2023
 # 원본(universe_2023.parquet)은 "사업의 내용" 원문 텍스트를 포함해 200MB에 육박해
 # GitHub/Streamlit Cloud에 올릴 수 없다. 앱은 원문 텍스트 없이 임베딩만 있으면
 # 되므로 build_app_dataset.py가 만든 경량 버전을 쓴다.
-UNIVERSE_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "data" / "processed" / f"universe_{UNIVERSE_YEAR}_app.parquet"
-)
+UNIVERSE_PATH = DATA_PROCESSED / f"universe_{UNIVERSE_YEAR}_app.parquet"
 
 COLOR_PRIMARY = "#2a78d6"  # blue — 단일 시리즈 기본색 (베타 막대, WACC 분포)
 COLOR_ACCENT = "#eb6834"  # orange — 강조/현재값 마커
@@ -320,7 +320,14 @@ st.caption(
 # ---------- 화면 3: 전체 상장기업 지도 (2D 임베딩 시각화) ----------
 st.header("③ 전체 상장기업 지도 — 사업 유사도 임베딩 2D 시각화")
 
-reduce_method = st.radio("차원축소 방법", ["PCA", "UMAP"], horizontal=True)
+# UMAP은 numba에 의존해서 배포 환경(파이썬 버전에 따라)에서 설치가 실패할 수 있다.
+# 선택 기능 하나 때문에 앱 전체가 죽지 않도록, 없으면 PCA만 제공한다.
+umap_available = importlib.util.find_spec("umap") is not None
+reduce_method = st.radio(
+    "차원축소 방법", ["PCA", "UMAP"] if umap_available else ["PCA"], horizontal=True
+)
+if not umap_available:
+    st.caption("UMAP 패키지가 설치되어 있지 않아 PCA만 사용합니다 (`pip install umap-learn`).")
 
 mask = usable_embedding_mask(universe)
 map_universe = universe[mask].reset_index(drop=True)

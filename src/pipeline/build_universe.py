@@ -23,13 +23,10 @@ import requests
 from src.collectors.dart_company import get_company_info, get_listed_corp_codes
 from src.collectors.dart_financials import compute_financial_ratios, get_financial_statements
 from src.collectors.dart_report_text import extract_business_description, find_annual_report_rcept_no
+from src.paths import DATA_PROCESSED, DATA_RAW, PROJECT_ROOT  # noqa: F401 (기존 import 경로 호환)
 
 MAX_RETRIES = 3
 RETRY_BACKOFF_SEC = 2
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DATA_RAW = PROJECT_ROOT / "data" / "raw"
-DATA_PROCESSED = PROJECT_ROOT / "data" / "processed"
 
 
 def _paths(year: int) -> tuple[Path, Path]:

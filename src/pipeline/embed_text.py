@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.pipeline.build_universe import DATA_PROCESSED
+from src.paths import DATA_PROCESSED
 
 MODEL_NAME = "jhgan/ko-sroberta-multitask"
 DESCRIPTION_TRUNCATE_CHARS = 3000

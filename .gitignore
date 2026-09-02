@@ -6,3 +6,5 @@ data/processed/*
 # 배포용 경량 데이터셋(사업보고서 원문 텍스트 제외)은 git에 포함시킨다.
 !data/processed/universe_2023_app.parquet
 __pycache__/
+# Streamlit Cloud에서 내려받은 배포 로그
+logs-*.txt

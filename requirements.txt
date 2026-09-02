@@ -1,24 +1,28 @@
-# Phase 1 — DART/KRX 원천 데이터 파이프라인
-OpenDartReader
-pandas
-numpy
-python-dotenv
-requests
-beautifulsoup4
-lxml
-FinanceDataReader
+# 배포되는 Streamlit 대시보드가 실행에 필요로 하는 것만 둔다.
+# DART 수집/배치 파이프라인까지 돌리려면 requirements-pipeline.txt를 설치할 것.
+#
+# 상한을 걸어둔 이유: 핀 없이 올렸더니 Streamlit Cloud가 pandas 3.0을 잡아서
+# 로컬(2.3.x)과 다른 스택으로 빌드됐다. 검증한 조합은 아래 주석 참고.
+#   pandas 2.3.3 / numpy 2.4.6 / streamlit 1.62.0 / plotly 7.0.0
+#   scikit-learn 1.9.0 / statsmodels 0.15.0 / pyarrow 25.0.1 / finance-datareader 0.9.202
 
-# Phase 2 — 배치 구축 / 텍스트 임베딩
-pyarrow
-sentence-transformers
-scikit-learn
+streamlit>=1.40,<2
+plotly>=5.20,<8
+pandas>=2.2,<3
+numpy>=1.26,<3
+pyarrow>=15
 
-# Phase 4 — 베타 회귀 / WACC
-statsmodels
+# 유사도(코사인/표준화) · 베타 회귀 · WACC
+scikit-learn>=1.4,<2
+statsmodels>=0.14,<1
 
-# Phase 5 — 대시보드
-streamlit
-plotly
+# KRX 주가/지수/시가총액.
+# 주의: import 이름은 FinanceDataReader지만 PyPI 배포명은 finance-datareader다.
+# (FinanceDataReader로 적으면 "No matching distribution found"로 배포가 깨진다)
+finance-datareader>=0.9.90
 
-# Phase 6 — 스코어카드/레이더차트, 2D 임베딩 지도(UMAP/PCA)
-umap-learn
+# 비상장기업 직접입력 모드에서 '사업의 내용'을 임베딩할 때만 로드된다(지연 import).
+sentence-transformers>=3,<7
+
+# 2D 임베딩 지도의 UMAP 옵션 (PCA는 scikit-learn으로 충분)
+umap-learn>=0.5.5

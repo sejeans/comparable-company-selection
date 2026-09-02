@@ -1,0 +1,11 @@
+# DART 원천데이터 수집 + 유니버스 배치 구축용 (로컬 실행 전용).
+# 배포되는 대시보드는 미리 만들어둔 parquet만 읽으므로 이 패키지들이 필요 없다.
+#
+# 설치: pip install -r requirements-pipeline.txt
+-r requirements.txt
+
+OpenDartReader>=0.2.2
+requests
+python-dotenv
+beautifulsoup4
+lxml
