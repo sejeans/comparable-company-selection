@@ -21,6 +21,10 @@ METRIC_LABELS = {
     "log_total_assets": "기업규모",
 }
 
+# 임베딩이 0벡터(사업의 내용 미확보)인 기업을 가려내는 기준. 정규화된 임베딩끼리의
+# 코사인 유사도가 정확히 0에 붙는 경우는 사실상 0벡터일 때뿐이다.
+EMBEDDING_EPSILON = 1e-9
+
 # 종합 유사도 계산에 쓰는 가중치 (사업 유사도에 가장 큰 비중을 둔다)
 WEIGHTS = {
     "business": 0.35,
@@ -52,14 +56,32 @@ def _industry_match(target_code, candidate_code) -> tuple[str, float]:
     return f"부분일치 ({common}자리)", common / len(target_code)
 
 
-def build_scorecard(target: dict, candidate: pd.Series, universe: pd.DataFrame) -> dict:
+def reference_stds(universe: pd.DataFrame) -> pd.Series:
+    """z-score 계산 기준이 되는 전체 유니버스의 재무비율 표준편차.
+
+    universe를 통째로 copy()하면 768차원 임베딩 컬럼까지 복사돼 비싸므로
+    필요한 컬럼만 떼어 쓴다 (후보 전체 순위를 매길 때 반복 호출되는 경로).
+    """
+    raw_cols = [f for f in FINANCIAL_FEATURES if f != "log_total_assets"]
+    ref = universe[raw_cols + ["total_assets"]].copy()
+    ref["log_total_assets"] = np.log(ref["total_assets"].clip(lower=1))
+    return ref[FINANCIAL_FEATURES].std()
+
+
+def build_scorecard(
+    target: dict,
+    candidate: pd.Series,
+    universe: pd.DataFrame | None = None,
+    stds: pd.Series | None = None,
+) -> dict:
     """target(평가대상) vs candidate(후보 기업 1개)의 항목별/종합 유사도를 계산한다.
 
     universe는 재무비율 표준편차를 구할 참조 모집단(전체 유니버스)이다.
+    여러 후보를 연속으로 계산할 때는 reference_stds()로 한 번만 구한 stds를
+    직접 넘겨 중복 계산을 피한다.
     """
-    ref = universe.copy()
-    ref["log_total_assets"] = np.log(ref["total_assets"].clip(lower=1))
-    stds = ref[FINANCIAL_FEATURES].std()
+    if stds is None:
+        stds = reference_stds(universe)
 
     target_vals = dict(target)
     target_vals["log_total_assets"] = float(np.log(max(target.get("total_assets") or 1, 1)))
@@ -81,16 +103,24 @@ def build_scorecard(target: dict, candidate: pd.Series, universe: pd.DataFrame) 
             continue
         metric_scores[feat] = _gaussian_similarity((t - c) / std)
 
+    # 사업의 내용을 못 파싱한 기업은 임베딩이 0벡터라 코사인 유사도가 정확히 0으로
+    # 나온다. 이걸 "사업 유사도 0%"로 세면 데이터가 없다는 이유만으로 순위가
+    # 밀리므로, 재무비율 결측과 똑같이 '데이터 없음'(None)으로 처리해 가중평균에서
+    # 빼고 나머지 항목으로만 종합 점수를 낸다.
     text_similarity = candidate.get("text_similarity")
-    business_score = float(text_similarity) * 100 if text_similarity is not None and not pd.isna(text_similarity) else None
+    if text_similarity is None or pd.isna(text_similarity) or abs(float(text_similarity)) < EMBEDDING_EPSILON:
+        business_score = None
+    else:
+        business_score = float(text_similarity) * 100
 
     parts = {"business": business_score, **metric_scores}
-    weighted_sum, weight_total = 0.0, 0.0
+    weighted_sum, weight_total, n_scored = 0.0, 0.0, 0
     for key, score in parts.items():
         if score is None:
             continue
         weighted_sum += WEIGHTS[key] * score
         weight_total += WEIGHTS[key]
+        n_scored += 1
     overall = weighted_sum / weight_total if weight_total > 0 else None
 
     def avg(*keys):
@@ -123,4 +153,27 @@ def build_scorecard(target: dict, candidate: pd.Series, universe: pd.DataFrame) 
         "industry_name": midclass_name(candidate["induty_code"]),
         "metric_rows": metric_rows,
         "radar": radar,
+        # 종합 점수가 몇 개 항목으로 계산됐는지. 결측이 많은 기업은 점수 자체를
+        # 곧이곧대로 믿으면 안 되므로 화면에 같이 표시한다.
+        "n_scored": n_scored,
+        "n_scorable": len(parts),
     }
+
+
+def rank_candidates(target: dict, candidates: pd.DataFrame, universe: pd.DataFrame) -> pd.DataFrame:
+    """후보 전체의 종합 유사도를 계산해 높은 순으로 순위를 매긴다.
+
+    select_candidates()가 돌려주는 순서는 2차 필터(재무비율 거리)만 반영한
+    순서라, 사업 텍스트 유사도까지 가중평균한 종합 유사도 순위와는 다를 수 있다.
+    스코어카드에서 "몇 위짜리 회사를 고른 것인지" 보여주려면 이 함수의 순위를 쓴다.
+    """
+    stds = reference_stds(universe)
+    cards = [build_scorecard(target, row, stds=stds) for _, row in candidates.iterrows()]
+
+    ranked = candidates.copy()
+    ranked["overall_score"] = [c["overall"] for c in cards]
+    ranked["n_scored"] = [c["n_scored"] for c in cards]
+    ranked["n_scorable"] = [c["n_scorable"] for c in cards]
+    ranked = ranked.sort_values("overall_score", ascending=False, na_position="last").reset_index(drop=True)
+    ranked["similarity_rank"] = range(1, len(ranked) + 1)
+    return ranked

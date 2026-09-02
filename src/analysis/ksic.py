@@ -79,12 +79,6 @@ KSIC_MIDCLASS_NAMES = {
     "96": "기타 개인 서비스업",
 }
 
-# DART induty_code에서 앞 3자리가 이 값으로 시작하면 반도체 제조업으로 본다
-# (261: 반도체 제조업 — 2611 반도체 소자, 2612 기타 전자부품 하위의 반도체
-# 관련 세분류가 여기 모인다. 262~266은 컴퓨터/통신/영상기기 등 인접 전자업종).
-SEMICONDUCTOR_PREFIX = "261"
-
-
 def midclass_code(induty_code) -> str:
     code = str(int(induty_code)).zfill(2)
     return code[:2]
@@ -93,7 +87,3 @@ def midclass_code(induty_code) -> str:
 def midclass_name(induty_code) -> str:
     code = midclass_code(induty_code)
     return KSIC_MIDCLASS_NAMES.get(code, f"기타(코드 {code})")
-
-
-def is_semiconductor(induty_code) -> bool:
-    return str(int(induty_code)).startswith(SEMICONDUCTOR_PREFIX)

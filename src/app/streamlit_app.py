@@ -15,7 +15,7 @@ import streamlit as st
 
 from src.analysis.beta import compute_beta_pool, median_beta
 from src.analysis.embedding_map import build_plot_frame, fit_reducer, reduce_2d, usable_embedding_mask
-from src.analysis.scorecard import build_scorecard
+from src.analysis.scorecard import build_scorecard, rank_candidates
 from src.analysis.similarity import embed_business_description, select_candidates
 from src.analysis.wacc import beta_pool_sensitivity, compute_wacc, debt_weight_from_ratio, sensitivity_summary
 from src.collectors.krx_price import get_market_caps
@@ -187,11 +187,16 @@ st.dataframe(
 # ---------- 화면 2: 최종 후보 스코어카드 ----------
 st.header("② 최종 후보 스코어카드")
 
+ranked = rank_candidates(target, candidates, universe)
+rank_by_name = dict(zip(ranked["corp_name"], ranked["similarity_rank"]))
+score_by_name = dict(zip(ranked["corp_name"], ranked["overall_score"]))
+
 final_pick = st.selectbox(
     "최종 기업 하나를 선택하면 항목별 유사도와 레이더 차트를 보여줍니다",
-    candidates["corp_name"].tolist(),
+    ranked["corp_name"].tolist(),
+    format_func=lambda name: f"{rank_by_name[name]}위 · {name} ({score_by_name[name]:.1f}%)",
 )
-picked_row = candidates[candidates["corp_name"] == final_pick].iloc[0]
+picked_row = ranked[ranked["corp_name"] == final_pick].iloc[0]
 card = build_scorecard(target, picked_row, universe)
 
 card_left, card_right = st.columns([1, 1])
@@ -199,8 +204,15 @@ card_left, card_right = st.columns([1, 1])
 with card_left:
     st.subheader(final_pick)
     overall = card["overall"]
-    st.metric("종합 유사도", f"{overall:.1f}%" if overall is not None else "N/A")
-    st.caption(f"업종: {card['industry_name']}")
+    m1, m2 = st.columns(2)
+    m1.metric("종합 유사도", f"{overall:.1f}%" if overall is not None else "N/A")
+    m2.metric("유사도 순위", f"{rank_by_name[final_pick]}위 / {len(ranked)}개")
+    coverage_note = (
+        ""
+        if card["n_scored"] == card["n_scorable"]
+        else f" · ⚠ 종합 점수는 {card['n_scorable']}개 항목 중 {card['n_scored']}개로만 계산됨"
+    )
+    st.caption(f"업종: {card['industry_name']}{coverage_note}")
 
     for row in card["metric_rows"]:
         label = row["label"]
@@ -257,6 +269,54 @@ with card_right:
     )
     st.plotly_chart(fig_radar, width="stretch", theme="streamlit")
 
+# 후보 전체 종합 유사도 랭킹 — 선택한 기업이 몇 위이고, 후보들끼리 얼마나 벌어져
+# 있는지(=아래에서 다룰 "선택의 주관성"이 얼마나 큰지)를 한 화면에서 보여준다.
+st.markdown("**후보 종합 유사도 랭킹**")
+
+rank_df = ranked.dropna(subset=["overall_score"]).copy()
+rank_df["label"] = rank_df["similarity_rank"].astype(str) + "위  " + rank_df["corp_name"]
+is_picked = rank_df["corp_name"] == final_pick
+
+fig_rank = go.Figure(
+    go.Bar(
+        x=rank_df["overall_score"],
+        y=rank_df["label"],
+        orientation="h",
+        marker=dict(
+            color=np.where(is_picked, COLOR_ACCENT, COLOR_PRIMARY),
+            cornerradius=4,
+        ),
+        # 직접 라벨은 선택한 기업 하나에만 — 나머지 값은 x축과 툴팁이 담당한다.
+        text=np.where(is_picked, rank_df["overall_score"].round(1).astype(str) + "%", ""),
+        textposition="outside",
+        textfont=dict(color="#3d3d3a"),
+        customdata=np.stack([rank_df["n_scored"], rank_df["n_scorable"]], axis=-1),
+        hovertemplate="%{y}<br>종합 유사도 %{x:.1f}%<br>산출 항목 %{customdata[0]}/%{customdata[1]}개<extra></extra>",
+    )
+)
+fig_rank.update_layout(
+    height=80 + 30 * len(rank_df),
+    margin=dict(t=10, b=10, l=10, r=10),
+    bargap=0.45,
+    showlegend=False,
+    xaxis=dict(
+        range=[0, 105],
+        ticksuffix="%",
+        gridcolor="#e8e6e1",
+        gridwidth=1,
+        zeroline=False,
+        title=None,
+    ),
+    yaxis=dict(autorange="reversed", title=None),
+)
+# 줌/팬이 필요 없는 차트이고, 툴바가 1위 막대의 값 라벨을 가려서 끈다.
+st.plotly_chart(fig_rank, width="stretch", theme="streamlit", config={"displayModeBar": False})
+st.caption(
+    "①의 후보 순서는 2차 필터(재무비율 거리)만 반영한 순서이고, 여기 순위는 "
+    "사업 텍스트 유사도까지 가중평균한 종합 유사도 기준이라 서로 다를 수 있습니다. "
+    "주황 막대가 현재 선택한 기업입니다."
+)
+
 # ---------- 화면 3: 전체 상장기업 지도 (2D 임베딩 시각화) ----------
 st.header("③ 전체 상장기업 지도 — 사업 유사도 임베딩 2D 시각화")
 
@@ -270,7 +330,18 @@ reducer = fit_reducer_cached(reduce_method, embeddings.tobytes(), embeddings.sha
 coords = reduce_2d(reducer, embeddings)
 
 top20_codes = set(candidates.sort_values("financial_distance").head(20)["stock_code"])
-plot_df = build_plot_frame(map_universe, coords, top_candidate_codes=top20_codes)
+
+# 1차 필터가 실제로 매칭에 쓴 업종코드 접두사 (예: LG화학이면 '2011')를 그대로
+# 써서 "평가대상과 같은 업종"을 채운 원으로 표시한다.
+match_level = int(candidates["industry_match_level"].iloc[0])
+target_industry_prefix = str(int(target["induty_code"]))[:match_level]
+
+plot_df = build_plot_frame(
+    map_universe,
+    coords,
+    top_candidate_codes=top20_codes,
+    target_industry_prefix=target_industry_prefix,
+)
 
 if target.get("embedding") is not None:
     target_xy = reduce_2d(reducer, np.asarray(target["embedding"], dtype=np.float32).reshape(1, -1))[0]
@@ -298,7 +369,7 @@ for label in industry_order:
             name=label,
             marker=dict(
                 color=color_map[label],
-                symbol=np.where(sub["is_semiconductor"], "circle", "circle-open"),
+                symbol=np.where(sub["is_target_industry"], "circle", "circle-open"),
                 size=np.where(sub["is_top_candidate"], 13, 7),
                 line=dict(
                     width=np.where(sub["is_top_candidate"], 2, 0.5),
@@ -332,9 +403,11 @@ fig_map.update_layout(
     yaxis_title=f"{reduce_method} 2",
 )
 st.plotly_chart(fig_map, width="stretch", theme="streamlit")
+n_same_industry = int(plot_df["is_target_industry"].sum())
 st.caption(
-    "● = 반도체 제조업(KSIC 261) · ○ = 그 외 업종 · ★ = 평가대상 기업 · "
-    "굵은 테두리 = 평가대상 기업 주변 Top 20 후보 · 색상 = KSIC 업종(중분류), 상위 "
+    f"● = 평가대상과 같은 업종(업종코드 {target_industry_prefix}로 시작, {n_same_industry}개 — "
+    "1차 필터가 후보를 찾은 범위) · ○ = 그 외 업종 · ★ = 평가대상 기업 · "
+    "굵은 테두리 = 최종 Top 20 후보 · 색상 = KSIC 업종(중분류), 상위 "
     f"{len(industry_order) - (1 if '기타 업종' in industry_order else 0)}개 외에는 '기타 업종'으로 묶음"
 )
 
