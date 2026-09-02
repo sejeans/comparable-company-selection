@@ -24,3 +24,13 @@ def get_weekly_returns(price_df: pd.DataFrame, price_col: str = "Close") -> pd.S
     """일별 종가를 주간 수익률로 변환한다 (베타 회귀용)."""
     weekly_close = price_df[price_col].resample("W-FRI").last()
     return weekly_close.pct_change().dropna()
+
+
+def get_market_caps() -> pd.Series:
+    """KRX 전 종목의 현재 시가총액(원)을 종목코드 기준으로 반환한다.
+
+    FinanceDataReader는 과거 시점 시가총액을 조회하는 API가 없어 현재가 기준
+    스냅샷만 제공한다 (스코어카드의 참고용 지표로만 사용).
+    """
+    listing = fdr.StockListing("KRX")
+    return listing.set_index("Code")["Marcap"]

@@ -9,15 +9,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
 from src.analysis.beta import compute_beta_pool, median_beta
+from src.analysis.embedding_map import build_plot_frame, fit_reducer, reduce_2d, usable_embedding_mask
+from src.analysis.scorecard import build_scorecard
 from src.analysis.similarity import embed_business_description, select_candidates
 from src.analysis.wacc import beta_pool_sensitivity, compute_wacc, debt_weight_from_ratio, sensitivity_summary
+from src.collectors.krx_price import get_market_caps
 
-UNIVERSE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "processed" / "universe_2023.parquet"
 UNIVERSE_YEAR = 2023
+# 원본(universe_2023.parquet)은 "사업의 내용" 원문 텍스트를 포함해 200MB에 육박해
+# GitHub/Streamlit Cloud에 올릴 수 없다. 앱은 원문 텍스트 없이 임베딩만 있으면
+# 되므로 build_app_dataset.py가 만든 경량 버전을 쓴다.
+UNIVERSE_PATH = (
+    Path(__file__).resolve().parent.parent.parent / "data" / "processed" / f"universe_{UNIVERSE_YEAR}_app.parquet"
+)
 
 COLOR_PRIMARY = "#2a78d6"  # blue — 단일 시리즈 기본색 (베타 막대, WACC 분포)
 COLOR_ACCENT = "#eb6834"  # orange — 강조/현재값 마커
@@ -38,6 +47,17 @@ def embed_text_cached(text: str) -> np.ndarray:
 @st.cache_data(show_spinner="주가 데이터로 베타 계산 중... (최대 수십 초 소요될 수 있습니다)")
 def compute_beta_pool_cached(stock_codes: tuple, end_date: str, years: int) -> pd.DataFrame:
     return compute_beta_pool(list(stock_codes), end_date=end_date, years=years)
+
+
+@st.cache_data(show_spinner="시가총액 조회 중...", ttl=3600)
+def market_caps_cached() -> pd.Series:
+    return get_market_caps()
+
+
+@st.cache_resource(show_spinner="전체 상장기업 임베딩을 2차원으로 축소하는 중... (UMAP은 수십 초 걸릴 수 있습니다)")
+def fit_reducer_cached(method: str, embeddings_bytes: bytes, shape: tuple):
+    embeddings = np.frombuffer(embeddings_bytes, dtype=np.float32).reshape(shape)
+    return fit_reducer(embeddings, method=method)
 
 
 universe = load_universe()
@@ -164,8 +184,162 @@ st.dataframe(
     hide_index=True,
 )
 
-# ---------- 화면 2: 베타풀 구성 ----------
-st.header("② 베타풀 구성")
+# ---------- 화면 2: 최종 후보 스코어카드 ----------
+st.header("② 최종 후보 스코어카드")
+
+final_pick = st.selectbox(
+    "최종 기업 하나를 선택하면 항목별 유사도와 레이더 차트를 보여줍니다",
+    candidates["corp_name"].tolist(),
+)
+picked_row = candidates[candidates["corp_name"] == final_pick].iloc[0]
+card = build_scorecard(target, picked_row, universe)
+
+card_left, card_right = st.columns([1, 1])
+
+with card_left:
+    st.subheader(final_pick)
+    overall = card["overall"]
+    st.metric("종합 유사도", f"{overall:.1f}%" if overall is not None else "N/A")
+    st.caption(f"업종: {card['industry_name']}")
+
+    for row in card["metric_rows"]:
+        label = row["label"]
+        if row.get("text") is not None:
+            st.markdown(f"**{label}**  · {row['text']}")
+            st.progress(row.get("ratio", 0.0))
+        elif row["score"] is not None:
+            st.markdown(f"**{label}**  · {row['score']:.1f}%")
+            st.progress(min(max(row["score"] / 100, 0.0), 1.0))
+        else:
+            st.markdown(f"**{label}**  · 데이터 없음")
+
+    beta_val = None
+    beta_df_state = st.session_state.get("beta_df")
+    if beta_df_state is not None:
+        match = beta_df_state[beta_df_state["stock_code"] == picked_row["stock_code"]]
+        if not match.empty and pd.notna(match.iloc[0]["beta"]):
+            beta_val = match.iloc[0]["beta"]
+
+    marcap_val = None
+    try:
+        caps = market_caps_cached()
+        if picked_row["stock_code"] in caps.index:
+            marcap_val = caps.loc[picked_row["stock_code"]]
+    except Exception:
+        pass
+
+    c1, c2 = st.columns(2)
+    c1.metric("Beta", f"{beta_val:.2f}" if beta_val is not None else "베타풀 계산 필요")
+    c2.metric("시가총액", f"{marcap_val / 1e8:,.0f}억" if marcap_val is not None else "N/A")
+
+with card_right:
+    radar = card["radar"]
+    radar_order = ["사업유사도", "규모", "재무구조", "성장률"]
+    radar_values = [radar[k] if radar[k] is not None else 0 for k in radar_order]
+    fig_radar = go.Figure()
+    fig_radar.add_trace(
+        go.Scatterpolar(
+            r=radar_values + radar_values[:1],
+            theta=radar_order + radar_order[:1],
+            fill="toself",
+            line_color=COLOR_PRIMARY,
+            fillcolor="rgba(42, 120, 214, 0.25)",
+        )
+    )
+    fig_radar.update_layout(
+        polar=dict(
+            radialaxis=dict(range=[0, 100], showticklabels=True, ticksuffix="%"),
+            angularaxis=dict(rotation=90, direction="clockwise"),
+        ),
+        showlegend=False,
+        margin=dict(t=30, b=30),
+        height=380,
+    )
+    st.plotly_chart(fig_radar, width="stretch", theme="streamlit")
+
+# ---------- 화면 3: 전체 상장기업 지도 (2D 임베딩 시각화) ----------
+st.header("③ 전체 상장기업 지도 — 사업 유사도 임베딩 2D 시각화")
+
+reduce_method = st.radio("차원축소 방법", ["PCA", "UMAP"], horizontal=True)
+
+mask = usable_embedding_mask(universe)
+map_universe = universe[mask].reset_index(drop=True)
+embeddings = np.stack(map_universe["embedding"].values).astype(np.float32)
+
+reducer = fit_reducer_cached(reduce_method, embeddings.tobytes(), embeddings.shape)
+coords = reduce_2d(reducer, embeddings)
+
+top20_codes = set(candidates.sort_values("financial_distance").head(20)["stock_code"])
+plot_df = build_plot_frame(map_universe, coords, top_candidate_codes=top20_codes)
+
+if target.get("embedding") is not None:
+    target_xy = reduce_2d(reducer, np.asarray(target["embedding"], dtype=np.float32).reshape(1, -1))[0]
+else:
+    target_xy = None
+
+industry_order = (
+    plot_df.loc[plot_df["industry_label"] != "기타 업종", "industry_label"].value_counts().index.tolist()
+)
+if "기타 업종" in plot_df["industry_label"].values:
+    industry_order.append("기타 업종")
+
+palette = px.colors.qualitative.Dark24 + px.colors.qualitative.Light24
+color_map = {label: palette[i % len(palette)] for i, label in enumerate(industry_order)}
+color_map["기타 업종"] = "#c9c5bb"
+
+fig_map = go.Figure()
+for label in industry_order:
+    sub = plot_df[plot_df["industry_label"] == label]
+    fig_map.add_trace(
+        go.Scattergl(
+            x=sub["x"],
+            y=sub["y"],
+            mode="markers",
+            name=label,
+            marker=dict(
+                color=color_map[label],
+                symbol=np.where(sub["is_semiconductor"], "circle", "circle-open"),
+                size=np.where(sub["is_top_candidate"], 13, 7),
+                line=dict(
+                    width=np.where(sub["is_top_candidate"], 2, 0.5),
+                    color=np.where(sub["is_top_candidate"], COLOR_ACCENT, "rgba(60,60,60,0.4)"),
+                ),
+                opacity=0.85,
+            ),
+            text=sub["corp_name"],
+            hovertemplate="%{text}<extra>" + label + "</extra>",
+        )
+    )
+
+if target_xy is not None:
+    fig_map.add_trace(
+        go.Scattergl(
+            x=[target_xy[0]],
+            y=[target_xy[1]],
+            mode="markers",
+            name="평가대상 기업",
+            marker=dict(symbol="star", size=22, color=COLOR_ACCENT, line=dict(width=1.5, color="black")),
+            text=[target_label],
+            hovertemplate="%{text} (평가대상)<extra></extra>",
+        )
+    )
+
+fig_map.update_layout(
+    height=650,
+    margin=dict(t=10, b=10),
+    legend=dict(title="KSIC 업종(중분류)", font=dict(size=11)),
+    xaxis_title=f"{reduce_method} 1",
+    yaxis_title=f"{reduce_method} 2",
+)
+st.plotly_chart(fig_map, width="stretch", theme="streamlit")
+st.caption(
+    "● = 반도체 제조업(KSIC 261) · ○ = 그 외 업종 · ★ = 평가대상 기업 · "
+    "굵은 테두리 = 평가대상 기업 주변 Top 20 후보 · 색상 = KSIC 업종(중분류), 상위 "
+    f"{len(industry_order) - (1 if '기타 업종' in industry_order else 0)}개 외에는 '기타 업종'으로 묶음"
+)
+
+# ---------- 화면 4: 베타풀 구성 ----------
+st.header("④ 베타풀 구성")
 
 candidate_key = tuple(candidates["stock_code"].tolist())
 
@@ -227,8 +401,8 @@ fig_beta.add_hline(y=1.0, line_dash="dash", line_color="#898781", annotation_tex
 fig_beta.update_layout(yaxis_title="베타", xaxis_title=None, margin=dict(t=10, b=10), height=350)
 st.plotly_chart(fig_beta, width="stretch", theme="streamlit")
 
-# ---------- 화면 3: 민감도 분석 ----------
-st.header("③ 민감도 분석 — 베타풀 구성에 따라 WACC이 얼마나 벌어지는가")
+# ---------- 화면 5: 민감도 분석 ----------
+st.header("⑤ 민감도 분석 — 베타풀 구성에 따라 WACC이 얼마나 벌어지는가")
 
 max_k = len(included)
 if max_k < 2:

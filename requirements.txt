@@ -19,3 +19,6 @@ statsmodels
 # Phase 5 — 대시보드
 streamlit
 plotly
+
+# Phase 6 — 스코어카드/레이더차트, 2D 임베딩 지도(UMAP/PCA)
+umap-learn
